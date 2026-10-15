@@ -4,6 +4,7 @@
 # ============================================================
 
 import streamlit as st  # Streamlit = turns Python code into a web page, no HTML server needed
+from pypdf import PdfReader  # pypdf = reads the text out of a PDF file, page by page
 
 # ---------- 1. Page settings (must be the FIRST Streamlit command) ----------
 st.set_page_config(  # tells the browser how to show our page
@@ -144,6 +145,37 @@ section[data-testid="stSidebar"] { border-right: 1px solid var(--rule); }
 # ---------- 3. Send the CSS to the page ----------
 st.markdown(STYLE, unsafe_allow_html=True)  # unsafe_allow_html=True means "yes, treat this as real HTML/CSS"
 
+
+# ---------- 3b. Helper functions: read the PDF, then cut it into chunks ----------
+def extract_text(pdf_file) -> str:
+    """Takes the uploaded PDF and returns all its text as one long string."""
+    reader = PdfReader(pdf_file)  # opens the PDF and finds its pages
+    pages_text = []  # empty list, we'll add each page's text into it
+    for page in reader.pages:  # loop over every page in the PDF, one at a time
+        text = page.extract_text() or ""  # pull the text out; "or ''" guards against a blank/image page
+        pages_text.append(text)  # add this page's text to our list
+    return "\n".join(pages_text)  # join all pages into one string, separated by newlines
+
+
+def make_chunks(full_text: str, chunk_size: int = 800, overlap: int = 150) -> list[str]:
+    """Cuts one long string into overlapping chunks (our 'index cards').
+
+    chunk_size = how many characters go on one card (roughly 120-150 words).
+    overlap    = characters repeated from the end of one card to the start of the
+                 next, so a sentence that got cut in half isn't lost between cards.
+    """
+    chunks = []  # empty list to collect the finished cards
+    start = 0  # where the next card begins, in characters
+    text_length = len(full_text)  # total number of characters in the whole PDF text
+    while start < text_length:  # keep going until we've covered the whole text
+        end = start + chunk_size  # where this card ends
+        chunk = full_text[start:end].strip()  # slice out the card's text; strip() removes stray spaces
+        if chunk:  # skip empty cards (can happen near blank pages)
+            chunks.append(chunk)  # add this card to our list
+        start = end - overlap  # move forward, but step back a bit so cards overlap
+    return chunks  # the full stack of index cards
+
+
 # ---------- 4. Sidebar (left panel): where the user uploads their PDF ----------
 with st.sidebar:  # everything indented under this line appears in the sidebar
     st.subheader("Your document")  # small heading
@@ -151,9 +183,23 @@ with st.sidebar:  # everything indented under this line appears in the sidebar
         "Upload a PDF",  # label above the box
         type=["pdf"],  # only allow .pdf files
     )  # the chosen file is saved in the variable uploaded_pdf (or None if nothing is chosen)
+
     if uploaded_pdf is not None:  # runs only after the user picks a file
+        # st.session_state is Streamlit's memory that survives between reruns (every click reruns the script).
+        # We only want to re-read and re-chunk the PDF when a NEW file is uploaded, not on every click,
+        # so we remember the file's name and skip the work if it hasn't changed.
+        if st.session_state.get("pdf_name") != uploaded_pdf.name:  # a new or different file was uploaded
+            with st.spinner("Reading and splitting your PDF..."):  # shows a small loading spinner
+                full_text = extract_text(uploaded_pdf)  # step A: read every page's text
+                chunks = make_chunks(full_text)  # step B: cut that text into index cards
+            st.session_state["pdf_name"] = uploaded_pdf.name  # remember which file we processed
+            st.session_state["chunks"] = chunks  # store the cards for the chat section to use later
+            st.session_state["chat_history"] = []  # start a fresh conversation for the new document
+
         size_kb = uploaded_pdf.size / 1024  # file size in bytes divided by 1024 gives kilobytes
         st.success(f"Received {uploaded_pdf.name} ({size_kb:.0f} KB)")  # green confirmation box
+        st.info(f"Split into {len(st.session_state['chunks'])} chunks (index cards).")  # shows the card count
+
     st.caption("Works with text-based PDFs. Scanned pictures of pages need OCR, which we skip.")  # small grey note
     st.caption("Use a public document. Free AI services may use text you send to improve their models.")  # privacy note
 
@@ -186,3 +232,40 @@ STEPS = """
 </div>
 """  # end of steps HTML
 st.markdown(STEPS, unsafe_allow_html=True)  # draw the four steps
+
+# ---------- 7. Chat section ----------
+st.markdown('<h2 class="how">Chat</h2>', unsafe_allow_html=True)  # reuse the "how" heading style for this title
+
+if "chat_history" not in st.session_state:  # the very first time the page ever loads
+    st.session_state["chat_history"] = []  # start with an empty conversation list
+
+if "chunks" not in st.session_state:  # no PDF has been uploaded yet this session
+    st.warning("Upload a PDF in the sidebar first, then ask a question below.")  # yellow reminder box
+else:
+    # --- replay the conversation so far ---
+    for role, message in st.session_state["chat_history"]:  # each saved turn is a (role, text) pair
+        with st.chat_message(role):  # draws a chat bubble styled for "user" or "assistant"
+            st.write(message)  # puts the text inside that bubble
+
+    # --- get a new question from the user ---
+    question = st.chat_input("Ask something about your PDF...")  # the box at the bottom of the page
+    if question:  # runs only once, right after the user presses Enter
+        st.session_state["chat_history"].append(("user", question))  # save the user's turn
+        with st.chat_message("user"):  # show their question immediately
+            st.write(question)
+
+        # PLACEholder reply for Step 1 only: real retrieval + Gemini answers arrive in Step 2.
+        # For now we just show the single chunk that shares the most words with the question,
+        # so you can see that chunking is actually working before we add real embeddings.
+        question_words = set(question.lower().split())  # the question's words, lowercased, no duplicates
+        best_chunk = max(  # pick the chunk that overlaps the question the most
+            st.session_state["chunks"],
+            key=lambda c: len(question_words & set(c.lower().split())),  # & = words shared by both
+        )
+        placeholder_answer = (
+            "Step 1 placeholder — real AI answers come in Step 2.\n\n"
+            f"Closest-matching chunk found by simple word overlap:\n\n> {best_chunk}"
+        )
+        st.session_state["chat_history"].append(("assistant", placeholder_answer))  # save the bot's turn
+        with st.chat_message("assistant"):  # show the placeholder reply
+            st.write(placeholder_answer)
