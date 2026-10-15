@@ -164,18 +164,27 @@ def make_chunks(full_text: str, chunk_size: int = 800, overlap: int = 150) -> li
     """Cuts one long string into overlapping chunks (our 'index cards').
 
     chunk_size = how many characters go on one card (roughly 120-150 words).
-    overlap    = characters repeated from the end of one card to the start of the
-                 next, so a sentence that got cut in half isn't lost between cards.
+    overlap    = characters repeated from the end of one card to the start of
+                 the next, so content near the boundary appears in both cards.
+
+    Key improvement over simple character slicing: we snap both the END of each
+    card and the START of the next one to the nearest space, so we never cut a
+    word in half (e.g. "Cop" | "ilot" becomes "Copilot" | "Copilot").
     """
     chunks = []  # empty list to collect the finished cards
     start = 0  # where the next card begins, in characters
     text_length = len(full_text)  # total number of characters in the whole PDF text
     while start < text_length:  # keep going until we've covered the whole text
-        end = start + chunk_size  # where this card ends
-        chunk = full_text[start:end].strip()  # slice out the card's text; strip() removes stray spaces
+        end = start + chunk_size  # ideal end position
+        if end < text_length:  # only snap if we're not already at the very end
+            while end > start and full_text[end] != " ":  # walk left until we hit a space
+                end -= 1  # step back one character at a time
+        chunk = full_text[start:end].strip()  # slice out the card; strip() removes stray spaces
         if chunk:  # skip empty cards (can happen near blank pages)
             chunks.append(chunk)  # add this card to our list
-        start = end - overlap  # move forward, but step back a bit so cards overlap
+        start = end - overlap  # step back by the overlap amount before moving to the next card
+        while start < text_length and full_text[start] == " ":  # skip leading spaces at the new start
+            start += 1  # walk forward past any space
     return chunks  # the full stack of index cards
 
 
