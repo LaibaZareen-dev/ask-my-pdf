@@ -156,7 +156,7 @@ def extract_text(pdf_file) -> str:
     pages_text = []  # empty list, we'll add each page's text into it
     for page in reader.pages:  # loop over every page in the PDF, one at a time
         text = page.extract_text() or ""  # pull the text out; "or ''" guards against a blank/image page
-        pages_text.append(" ".join(text.split()))  # collapses every newline and extra space into one space
+        pages_text.append(" ".join(text.split()))  # collapse newlines/extra spaces into single spaces
     return "\n".join(pages_text)  # join all pages into one string, separated by newlines
 
 
@@ -182,8 +182,12 @@ def make_chunks(full_text: str, chunk_size: int = 800, overlap: int = 150) -> li
 def build_search_index(chunks: list[str]):
     """Turns all chunks into TF-IDF numbers, once, right after upload (this is 'Moment A' from
     our earlier chat — the one-time setup step, before any question is asked)."""
-    vectorizer = TfidfVectorizer(stop_words="english")  # stop_words drops filler words like "the", "is"
-    chunk_vectors = vectorizer.fit_transform(chunks)  # learns the vocabulary AND scores every chunk at once
+    vectorizer = TfidfVectorizer(  # the tool that scores text
+        analyzer="char_wb",  # compare small letter-groups instead of whole words, so "resource" matches "resources"
+        ngram_range=(3, 5),  # letter-groups that are 3 to 5 letters long
+        sublinear_tf=True,  # stops a word repeated many times from dominating the score
+    )
+    chunk_vectors = vectorizer.fit_transform(chunks)  # learns the letter-groups AND scores every chunk at once
     return vectorizer, chunk_vectors  # we need both: the vectorizer to score future questions the same way
 
 
@@ -206,7 +210,8 @@ def ask_gemini(question: str, context_chunks: list[str], api_key: str) -> str:
     prompt = (
         "You are a helpful assistant that answers ONLY using the cards below, which are excerpts "
         "from a document. If the answer is not contained in the cards, reply exactly: "
-        "\"I don't know — that isn't in this document.\" Do not use outside knowledge.\n\n"
+        "\"I don't know — that isn't in this document.\" Do not use outside knowledge. "
+        "If the cards contain links (URLs) that answer the question, list them in full.\n\n"
         f"{numbered_cards}\n\n"
         f"Question: {question}\n"
         "Answer:"
@@ -262,13 +267,13 @@ with st.sidebar:  # everything indented under this line appears in the sidebar
 
     # Prefer a key saved in Streamlit's secrets (st.secrets) so visitors to your LIVE app don't need
     # their own key. Locally, or if no secret is set, fall back to a text box so you can still test.
-    saved_key = ""
-    for key_name in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GOOGLE_API_KEY"):  # accept any of these secret names
+    saved_key = ""  # empty until we find a key
+    for key_name in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GOOGLE_API_KEY", "GOOGLE_API_KEY_2"):  # accept any of these secret names
         try:
-            if key_name in st.secrets:
-                saved_key = str(st.secrets[key_name]).strip()
-                break
-        except Exception:  # raised when there's no secrets.toml file at all (e.g. first local run)
+            if key_name in st.secrets:  # is a secret with this name saved?
+                saved_key = str(st.secrets[key_name]).strip()  # read it and trim stray spaces
+                break  # found one, stop looking
+        except Exception:  # raised when there's no secrets file at all (e.g. first local run)
             break
 
     if saved_key:
@@ -277,6 +282,11 @@ with st.sidebar:  # everything indented under this line appears in the sidebar
     else:
         api_key = st.text_input("Gemini API key", type="password")  # type="password" hides what's typed
         st.caption("No saved key found — paste your Gemini API key here for now.")
+
+    top_k = st.slider(  # lets you choose how many cards are sent to Gemini per question
+        "Passages sent to the AI", min_value=1, max_value=8, value=5,
+        help="More passages = more chance the answer is included, but more text for the AI to read.",
+    )
 
 # ---------- 5. Hero section (the big navy panel) ----------
 # NOTE: the HTML below has no blank lines and no indentation on purpose.
@@ -335,11 +345,12 @@ else:
                 st.write(answer)
             else:
                 with st.spinner("Searching your PDF and asking Gemini..."):
-                    top_chunks = find_best_chunks(  # step 1: find the 3 best-matching cards
+                    top_chunks = find_best_chunks(  # step 1: find the best-matching cards
                         question,
                         st.session_state["chunks"],
                         st.session_state["vectorizer"],
                         st.session_state["chunk_vectors"],
+                        top_k=top_k,  # how many cards, from the sidebar slider
                     )
                     try:
                         answer = ask_gemini(question, top_chunks, api_key)  # step 2: Gemini answers from those cards
