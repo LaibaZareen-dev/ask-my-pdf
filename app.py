@@ -156,7 +156,7 @@ def extract_text(pdf_file) -> str:
     pages_text = []  # empty list, we'll add each page's text into it
     for page in reader.pages:  # loop over every page in the PDF, one at a time
         text = page.extract_text() or ""  # pull the text out; "or ''" guards against a blank/image page
-        pages_text.append(text)  # add this page's text to our list
+        pages_text.append(" ".join(text.split()))  # collapses every newline and extra space into one space
     return "\n".join(pages_text)  # join all pages into one string, separated by newlines
 
 
