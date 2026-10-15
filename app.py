@@ -4,10 +4,7 @@
 # ============================================================
 
 import streamlit as st  # Streamlit = turns Python code into a web page, no HTML server needed
-from pypdf import PdfReader  # pypdf = reads the text out of a PDF file, page by page
-from sklearn.feature_extraction.text import TfidfVectorizer  # turns text into "importance of each word" numbers
-from sklearn.metrics.pairwise import cosine_similarity  # measures how close two sets of numbers are
-from google import genai  # official Gemini API client
+from rag_core import extract_text, make_chunks, build_search_index, find_best_chunks, ask_gemini, find_saved_key  # our engine room
 
 # ---------- 1. Page settings (must be the FIRST Streamlit command) ----------
 st.set_page_config(  # tells the browser how to show our page
@@ -149,89 +146,6 @@ section[data-testid="stSidebar"] { border-right: 1px solid var(--rule); }
 st.markdown(STYLE, unsafe_allow_html=True)  # unsafe_allow_html=True means "yes, treat this as real HTML/CSS"
 
 
-# ---------- 3b. Helper functions: read the PDF, then cut it into chunks ----------
-def extract_text(pdf_file) -> str:
-    """Takes the uploaded PDF and returns all its text as one long string."""
-    reader = PdfReader(pdf_file)  # opens the PDF and finds its pages
-    pages_text = []  # empty list, we'll add each page's text into it
-    for page in reader.pages:  # loop over every page in the PDF, one at a time
-        text = page.extract_text() or ""  # pull the text out; "or ''" guards against a blank/image page
-        pages_text.append(" ".join(text.split()))  # collapse newlines/extra spaces into single spaces
-    return "\n".join(pages_text)  # join all pages into one string, separated by newlines
-
-
-def make_chunks(full_text: str, chunk_size: int = 800, overlap: int = 150) -> list[str]:
-    """Cuts one long string into overlapping chunks (our 'index cards').
-
-    chunk_size = how many characters go on one card (roughly 120-150 words).
-    overlap    = characters repeated from the end of one card to the start of
-                 the next, so content near the boundary appears in both cards.
-
-    Key improvement over simple character slicing: we snap both the END of each
-    card and the START of the next one to the nearest space, so we never cut a
-    word in half (e.g. "Cop" | "ilot" becomes "Copilot" | "Copilot").
-    """
-    chunks = []  # empty list to collect the finished cards
-    start = 0  # where the next card begins, in characters
-    text_length = len(full_text)  # total number of characters in the whole PDF text
-    while start < text_length:  # keep going until we've covered the whole text
-        end = start + chunk_size  # ideal end position
-        if end < text_length:  # only snap if we're not already at the very end
-            while end > start and full_text[end] != " ":  # walk left until we hit a space
-                end -= 1  # step back one character at a time
-        chunk = full_text[start:end].strip()  # slice out the card; strip() removes stray spaces
-        if chunk:  # skip empty cards (can happen near blank pages)
-            chunks.append(chunk)  # add this card to our list
-        start = end - overlap  # step back by the overlap amount before moving to the next card
-        while start < text_length and full_text[start] == " ":  # skip leading spaces at the new start
-            start += 1  # walk forward past any space
-    return chunks  # the full stack of index cards
-
-
-def build_search_index(chunks: list[str]):
-    """Turns all chunks into TF-IDF numbers, once, right after upload (this is 'Moment A' from
-    our earlier chat — the one-time setup step, before any question is asked)."""
-    vectorizer = TfidfVectorizer(  # the tool that scores text
-        analyzer="char_wb",  # compare small letter-groups instead of whole words, so "resource" matches "resources"
-        ngram_range=(3, 5),  # letter-groups that are 3 to 5 letters long
-        sublinear_tf=True,  # stops a word repeated many times from dominating the score
-    )
-    chunk_vectors = vectorizer.fit_transform(chunks)  # learns the letter-groups AND scores every chunk at once
-    return vectorizer, chunk_vectors  # we need both: the vectorizer to score future questions the same way
-
-
-def find_best_chunks(question: str, chunks: list[str], vectorizer, chunk_vectors, top_k: int = 3) -> list[str]:
-    """Given a question, returns the top_k chunks closest to it in meaning.
-    This is 'Moment B' — it runs fresh every time a question is asked."""
-    question_vector = vectorizer.transform([question])  # scores the question using the SAME vocabulary as the chunks
-    scores = cosine_similarity(question_vector, chunk_vectors)[0]  # one similarity score per chunk (0 = unrelated, 1 = identical)
-    top_indices = scores.argsort()[::-1][:top_k]  # sort scores highest-first, keep the top_k positions
-    return [chunks[i] for i in top_indices]  # fetch the actual chunk text at those positions
-
-
-def ask_gemini(question: str, context_chunks: list[str], api_key: str) -> str:
-    """Sends the question + the retrieved chunks to Gemini, and returns its answer.
-    This is the 'writer' from our librarian/writer analogy — it never sees the whole PDF."""
-    client = genai.Client(api_key=api_key)  # connects to Gemini using your API key
-    numbered_cards = "\n\n".join(  # lay the chunks out as "Card 1: ...", "Card 2: ..." for the prompt
-        f"Card {i+1}: {chunk}" for i, chunk in enumerate(context_chunks)
-    )
-    prompt = (
-        "You are a helpful assistant that answers ONLY using the cards below, which are excerpts "
-        "from a document. If the answer is not contained in the cards, reply exactly: "
-        "\"I don't know — that isn't in this document.\" Do not use outside knowledge. "
-        "If the cards contain links (URLs) that answer the question, list them in full.\n\n"
-        f"{numbered_cards}\n\n"
-        f"Question: {question}\n"
-        "Answer:"
-    )
-    response = client.models.generate_content(  # the actual API call to Gemini
-        model="gemini-3.5-flash-lite",  # same model you used in Project 1 (good free-tier quota)
-        contents=prompt,
-    )
-    return response.text  # Gemini's written answer, as plain text
-
-
 # ---------- 4. Sidebar (left panel): where the user uploads their PDF ----------
 with st.sidebar:  # everything indented under this line appears in the sidebar
     st.subheader("Your document")  # small heading
@@ -276,14 +190,7 @@ with st.sidebar:  # everything indented under this line appears in the sidebar
 
     # Prefer a key saved in Streamlit's secrets (st.secrets) so visitors to your LIVE app don't need
     # their own key. Locally, or if no secret is set, fall back to a text box so you can still test.
-    saved_key = ""  # empty until we find a key
-    for key_name in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GOOGLE_API_KEY", "GOOGLE_API_KEY_2"):  # accept any of these secret names
-        try:
-            if key_name in st.secrets:  # is a secret with this name saved?
-                saved_key = str(st.secrets[key_name]).strip()  # read it and trim stray spaces
-                break  # found one, stop looking
-        except Exception:  # raised when there's no secrets file at all (e.g. first local run)
-            break
+    saved_key = find_saved_key()  # looks for the key in Streamlit secrets (see rag_core.py)
 
     if saved_key:
         api_key = saved_key  # use the key stored in Streamlit Cloud's secrets
