@@ -9,7 +9,7 @@ Ask questions about a PDF in plain English and get answers grounded in the docum
 
 ![Chat with sources](screenshots/chat.png)
 ![Scorecard results](screenshots/scorecard.png)
-
+![Scorecard results](screenshots/scorecard-full.png)
 ## How it works
 
 1. **Load:** the PDF text is extracted with `pypdf`.
