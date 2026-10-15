@@ -1,0 +1,8 @@
+# Theme settings: forces a light look so the page never turns dark on dark-mode phones
+[theme]
+base = "light"                        # start from Streamlit's light theme
+primaryColor = "#3B54B4"              # buttons and highlights (calm blue)
+backgroundColor = "#E9EEF5"           # page background (cool grey-blue)
+secondaryBackgroundColor = "#FFFEFA"  # sidebar background (index-card white)
+textColor = "#1B2A4A"                 # main text colour (deep ink blue)
+font = "sans serif"                   # default font for Streamlit's own widgets
