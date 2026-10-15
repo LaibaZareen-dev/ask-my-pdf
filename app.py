@@ -262,10 +262,16 @@ with st.sidebar:  # everything indented under this line appears in the sidebar
 
     # Prefer a key saved in Streamlit's secrets (st.secrets) so visitors to your LIVE app don't need
     # their own key. Locally, or if no secret is set, fall back to a text box so you can still test.
-    try:
-        saved_key = st.secrets.get("GEMINI_API_KEY", "")  # "" if the key itself is missing
-    except Exception:  # raised when there's no secrets.toml file at all (e.g. first local run)
-        saved_key = ""
+       # Look for the key in Streamlit secrets under either common name
+    saved_key = ""
+        for key_name in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GOOGLE_API_KEY"):
+        try:
+            if key_name in st.secrets:
+                saved_key = str(st.secrets[key_name]).strip()
+                break
+        except Exception:  # no secrets.toml at all (e.g. first local run)
+            break
+
     if saved_key:
         api_key = saved_key  # use the key stored in Streamlit Cloud's secrets
         st.caption("Using the Gemini API key saved in this app's secrets.")
