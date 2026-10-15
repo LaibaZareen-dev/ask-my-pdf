@@ -5,6 +5,9 @@
 
 import streamlit as st  # Streamlit = turns Python code into a web page, no HTML server needed
 from pypdf import PdfReader  # pypdf = reads the text out of a PDF file, page by page
+from sklearn.feature_extraction.text import TfidfVectorizer  # turns text into "importance of each word" numbers
+from sklearn.metrics.pairwise import cosine_similarity  # measures how close two sets of numbers are
+from google import genai  # official Gemini API client
 
 # ---------- 1. Page settings (must be the FIRST Streamlit command) ----------
 st.set_page_config(  # tells the browser how to show our page
@@ -176,6 +179,45 @@ def make_chunks(full_text: str, chunk_size: int = 800, overlap: int = 150) -> li
     return chunks  # the full stack of index cards
 
 
+def build_search_index(chunks: list[str]):
+    """Turns all chunks into TF-IDF numbers, once, right after upload (this is 'Moment A' from
+    our earlier chat — the one-time setup step, before any question is asked)."""
+    vectorizer = TfidfVectorizer(stop_words="english")  # stop_words drops filler words like "the", "is"
+    chunk_vectors = vectorizer.fit_transform(chunks)  # learns the vocabulary AND scores every chunk at once
+    return vectorizer, chunk_vectors  # we need both: the vectorizer to score future questions the same way
+
+
+def find_best_chunks(question: str, chunks: list[str], vectorizer, chunk_vectors, top_k: int = 3) -> list[str]:
+    """Given a question, returns the top_k chunks closest to it in meaning.
+    This is 'Moment B' — it runs fresh every time a question is asked."""
+    question_vector = vectorizer.transform([question])  # scores the question using the SAME vocabulary as the chunks
+    scores = cosine_similarity(question_vector, chunk_vectors)[0]  # one similarity score per chunk (0 = unrelated, 1 = identical)
+    top_indices = scores.argsort()[::-1][:top_k]  # sort scores highest-first, keep the top_k positions
+    return [chunks[i] for i in top_indices]  # fetch the actual chunk text at those positions
+
+
+def ask_gemini(question: str, context_chunks: list[str], api_key: str) -> str:
+    """Sends the question + the retrieved chunks to Gemini, and returns its answer.
+    This is the 'writer' from our librarian/writer analogy — it never sees the whole PDF."""
+    client = genai.Client(api_key=api_key)  # connects to Gemini using your API key
+    numbered_cards = "\n\n".join(  # lay the chunks out as "Card 1: ...", "Card 2: ..." for the prompt
+        f"Card {i+1}: {chunk}" for i, chunk in enumerate(context_chunks)
+    )
+    prompt = (
+        "You are a helpful assistant that answers ONLY using the cards below, which are excerpts "
+        "from a document. If the answer is not contained in the cards, reply exactly: "
+        "\"I don't know — that isn't in this document.\" Do not use outside knowledge.\n\n"
+        f"{numbered_cards}\n\n"
+        f"Question: {question}\n"
+        "Answer:"
+    )
+    response = client.models.generate_content(  # the actual API call to Gemini
+        model="gemini-3.5-flash-lite",  # same model you used in Project 1 (good free-tier quota)
+        contents=prompt,
+    )
+    return response.text  # Gemini's written answer, as plain text
+
+
 # ---------- 4. Sidebar (left panel): where the user uploads their PDF ----------
 with st.sidebar:  # everything indented under this line appears in the sidebar
     st.subheader("Your document")  # small heading
@@ -184,24 +226,52 @@ with st.sidebar:  # everything indented under this line appears in the sidebar
         type=["pdf"],  # only allow .pdf files
     )  # the chosen file is saved in the variable uploaded_pdf (or None if nothing is chosen)
 
-    if uploaded_pdf is not None:  # runs only after the user picks a file
+    if st.button("Or try the sample document"):  # a button so visitors can test without having a PDF
+        st.session_state["use_sample"] = True  # remember that they chose the sample
+
+    pdf_file, pdf_name = None, None  # will hold whichever file we end up using, and its name
+    if uploaded_pdf is not None:  # the visitor uploaded their own PDF, so that wins
+        pdf_file, pdf_name = uploaded_pdf, uploaded_pdf.name
+        st.session_state["use_sample"] = False  # forget the sample choice
+    elif st.session_state.get("use_sample"):  # no upload, but they pressed the sample button
+        pdf_file, pdf_name = "sample.pdf", "sample.pdf (demo)"  # sample.pdf sits next to app.py in the repo
+
+    if pdf_file is not None:  # runs once we have a file, uploaded or sample
         # st.session_state is Streamlit's memory that survives between reruns (every click reruns the script).
         # We only want to re-read and re-chunk the PDF when a NEW file is uploaded, not on every click,
         # so we remember the file's name and skip the work if it hasn't changed.
-        if st.session_state.get("pdf_name") != uploaded_pdf.name:  # a new or different file was uploaded
-            with st.spinner("Reading and splitting your PDF..."):  # shows a small loading spinner
-                full_text = extract_text(uploaded_pdf)  # step A: read every page's text
+        if st.session_state.get("pdf_name") != pdf_name:  # a new or different file was uploaded
+            with st.spinner("Reading, splitting, and indexing your PDF..."):  # shows a small loading spinner
+                full_text = extract_text(pdf_file)  # step A: read every page's text
                 chunks = make_chunks(full_text)  # step B: cut that text into index cards
-            st.session_state["pdf_name"] = uploaded_pdf.name  # remember which file we processed
+                vectorizer, chunk_vectors = build_search_index(chunks)  # step C: score every card's words, once
+            st.session_state["pdf_name"] = pdf_name  # remember which file we processed
             st.session_state["chunks"] = chunks  # store the cards for the chat section to use later
+            st.session_state["vectorizer"] = vectorizer  # store the word-scorer so questions are scored the same way
+            st.session_state["chunk_vectors"] = chunk_vectors  # store every card's numbers
             st.session_state["chat_history"] = []  # start a fresh conversation for the new document
 
-        size_kb = uploaded_pdf.size / 1024  # file size in bytes divided by 1024 gives kilobytes
-        st.success(f"Received {uploaded_pdf.name} ({size_kb:.0f} KB)")  # green confirmation box
+        st.success(f"Using: {pdf_name}")  # green confirmation box
         st.info(f"Split into {len(st.session_state['chunks'])} chunks (index cards).")  # shows the card count
 
     st.caption("Works with text-based PDFs. Scanned pictures of pages need OCR, which we skip.")  # small grey note
     st.caption("Use a public document. Free AI services may use text you send to improve their models.")  # privacy note
+
+    st.divider()  # a thin horizontal line, to visually separate the two sidebar sections
+    st.subheader("AI settings")  # second sidebar heading
+
+    # Prefer a key saved in Streamlit's secrets (st.secrets) so visitors to your LIVE app don't need
+    # their own key. Locally, or if no secret is set, fall back to a text box so you can still test.
+    try:
+        saved_key = st.secrets.get("GEMINI_API_KEY", "")  # "" if the key itself is missing
+    except Exception:  # raised when there's no secrets.toml file at all (e.g. first local run)
+        saved_key = ""
+    if saved_key:
+        api_key = saved_key  # use the key stored in Streamlit Cloud's secrets
+        st.caption("Using the Gemini API key saved in this app's secrets.")
+    else:
+        api_key = st.text_input("Gemini API key", type="password")  # type="password" hides what's typed
+        st.caption("No saved key found — paste your Gemini API key here for now.")
 
 # ---------- 5. Hero section (the big navy panel) ----------
 # NOTE: the HTML below has no blank lines and no indentation on purpose.
@@ -254,18 +324,25 @@ else:
         with st.chat_message("user"):  # show their question immediately
             st.write(question)
 
-        # PLACEholder reply for Step 1 only: real retrieval + Gemini answers arrive in Step 2.
-        # For now we just show the single chunk that shares the most words with the question,
-        # so you can see that chunking is actually working before we add real embeddings.
-        question_words = set(question.lower().split())  # the question's words, lowercased, no duplicates
-        best_chunk = max(  # pick the chunk that overlaps the question the most
-            st.session_state["chunks"],
-            key=lambda c: len(question_words & set(c.lower().split())),  # & = words shared by both
-        )
-        placeholder_answer = (
-            "Step 1 placeholder — real AI answers come in Step 2.\n\n"
-            f"Closest-matching chunk found by simple word overlap:\n\n> {best_chunk}"
-        )
-        st.session_state["chat_history"].append(("assistant", placeholder_answer))  # save the bot's turn
-        with st.chat_message("assistant"):  # show the placeholder reply
-            st.write(placeholder_answer)
+        with st.chat_message("assistant"):  # show the bot's reply in a bubble
+            if not api_key:  # no Gemini key available (neither secret nor typed)
+                answer = "Please add a Gemini API key in the sidebar first."
+                st.write(answer)
+            else:
+                with st.spinner("Searching your PDF and asking Gemini..."):
+                    top_chunks = find_best_chunks(  # step 1: find the 3 best-matching cards
+                        question,
+                        st.session_state["chunks"],
+                        st.session_state["vectorizer"],
+                        st.session_state["chunk_vectors"],
+                    )
+                    try:
+                        answer = ask_gemini(question, top_chunks, api_key)  # step 2: Gemini answers from those cards
+                    except Exception as error:  # catches bad keys, network errors, hitting a free-tier limit, etc.
+                        answer = f"Something went wrong calling Gemini: {error}"
+                st.write(answer)  # show the AI's answer
+                with st.expander("Sources — the cards Gemini was given"):  # collapsible "show your work" section
+                    for i, chunk in enumerate(top_chunks, start=1):  # number each source card
+                        st.markdown(f"**Card {i}**")
+                        st.caption(chunk)
+        st.session_state["chat_history"].append(("assistant", answer))  # save the bot's turn for history replay
