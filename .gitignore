@@ -1,0 +1,4 @@
+# Never commit real secrets - Streamlit Cloud's dashboard stores your real API keys instead
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
