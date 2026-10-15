@@ -263,7 +263,7 @@ with st.sidebar:  # everything indented under this line appears in the sidebar
     # Prefer a key saved in Streamlit's secrets (st.secrets) so visitors to your LIVE app don't need
     # their own key. Locally, or if no secret is set, fall back to a text box so you can still test.
     try:
-        saved_key = st.secrets.get("GEMINI_API_KEY", "")  # "" if the key itself is missing
+        saved_key = st.secrets.get("GEMINI_API_KEY_2", "")  # "" if the key itself is missing
     except Exception:  # raised when there's no secrets.toml file at all (e.g. first local run)
         saved_key = ""
     if saved_key:
